@@ -11,12 +11,14 @@ permissions:
   pull-requests: read
 
 jobs:
-  # Job-level "name:" set to match exactly what the ruleset currently
-  # requires ("Validate PR title"). If you ever change this, you must
-  # update the ruleset's required checks to match, or it will get stuck
-  # exactly like this again.
+  # NOTE: The ruleset's required status checks reference these jobs by
+  # their job id ("title-check" / "description-check"), NOT a custom
+  # display name. Do NOT add a "name:" override on these jobs unless you
+  # also update the ruleset's required checks to match exactly Ã¢â‚¬â€ otherwise
+  # the check will report under the new name, never satisfy the required
+  # check, and the PR will sit stuck on "Waiting for status to be reported"
+  # forever (this has happened before on this repo).
   title-check:
-    name: Validate PR title
     runs-on: ubuntu-latest
     steps:
       - uses: amannn/action-semantic-pull-request@v5
@@ -43,9 +45,8 @@ jobs:
           wip: true
           validateSingleCommit: false
 
-  # Matches the ruleset's required "Validate PR description" check.
+  # Matches the ruleset's required "description-check" check (job id).
   description-check:
-    name: Validate PR description
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write   # needed to post/update the summary comment
@@ -58,7 +59,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          # Normalize line endings â€” a PR body edited on Windows can contain
+          # Normalize line endings Ã¢â‚¬â€ a PR body edited on Windows can contain
           # \r\n, which would break exact header matching below otherwise.
           printf '%s' "$PR_BODY" | tr -d '\r' > pr_body.txt
 
@@ -150,7 +151,7 @@ jobs:
             | jq -r --arg marker "$MARKER" '.[] | select(.body | contains($marker)) | .id' | head -n1)
 
           if [ "${#ERRORS[@]}" -gt 0 ]; then
-            BODY="$MARKER"$'\n'"### âŒ PR description needs a few fixes"$'\n\n'
+            BODY="$MARKER"$'\n'"### Ã¢Å’ PR description needs a few fixes"$'\n\n'
             for e in "${ERRORS[@]}"; do
               BODY+="- $e"$'\n'
             done
@@ -169,11 +170,11 @@ jobs:
             exit 1
           else
             if [ -n "$EXISTING_ID" ]; then
-              BODY="$MARKER"$'\n'"### âœ… PR description looks good"
+              BODY="$MARKER"$'\n'"### Ã¢Å“â€¦ PR description looks good"
               PAYLOAD=$(jq -n --arg body "$BODY" '{body: $body}')
               curl -s -X PATCH -H "Authorization: token $GH_TOKEN" \
                 -H "Content-Type: application/json" -d "$PAYLOAD" \
                 "https://api.github.com/repos/$REPO/issues/comments/$EXISTING_ID" > /dev/null
             fi
-            echo "âœ… PR description passed all checks."
+            echo "Ã¢Å“â€¦ PR description passed all checks."
           fi
