@@ -11,9 +11,12 @@ permissions:
   pull-requests: read
 
 jobs:
-  # No job-level "name:" here on purpose â€” the reported check name stays
-  # exactly "title-check", matching what's already required in the ruleset.
+  # Job-level "name:" set to match exactly what the ruleset currently
+  # requires ("Validate PR title"). If you ever change this, you must
+  # update the ruleset's required checks to match, or it will get stuck
+  # exactly like this again.
   title-check:
+    name: Validate PR title
     runs-on: ubuntu-latest
     steps:
       - uses: amannn/action-semantic-pull-request@v5
@@ -40,8 +43,9 @@ jobs:
           wip: true
           validateSingleCommit: false
 
-  # Same here â€” reported check name stays exactly "description-check".
+  # Matches the ruleset's required "Validate PR description" check.
   description-check:
+    name: Validate PR description
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write   # needed to post/update the summary comment
