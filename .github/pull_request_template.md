@@ -2,18 +2,15 @@
 <!-- What does this change do, and why? 2-4 sentences. -->
 
 
-## Related Issue
-<!-- Jira ticket key(s), e.g. PROJ-123. Write "No related ticket" if there genuinely isn't one. -->
+## Jira Ticket
+<!-- e.g. PROJ-123. Write "No related ticket" if there genuinely isn't one. -->
 
 
 ## Type of Change
-<!-- Check all that apply. Keep this aligned with your commit type (feat/fix/etc). -->
-- [ ] New feature (`feat`)
-- [ ] Bug fix (`fix`)
-- [ ] Breaking change
-- [ ] Documentation (`docs`)
-- [ ] Chore / tooling (`chore`)
-- [ ] Refactor (no functional change)
+- [ ] Bug fix (non-breaking change which fixes an issue)
+- [ ] New feature (non-breaking change which adds functionality)
+- [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
+- [ ] This change requires a documentation update
 
 
 ## Configuration / Values Changes
@@ -33,3 +30,16 @@
 
 ## Testing
 <!-- How was this verified? What did you run or check? -->
+
+
+## Checklist
+- [ ] My code follows style guidelines
+- [ ] I performed a self-review of my code
+- [ ] I commented my code, particularly in hard-to-understand areas
+- [ ] I made corresponding changes to the documentation
+- [ ] My changes generate no new warnings
+- [ ] I added tests exercising my implementation
+- [ ] New and existing unit tests pass locally with my changes
+- [ ] I have checked my code and corrected any misspellings
+- [ ] I considered security ramifications and mitigated to the best of my knowledge
+- [ ] Any dependent changes have been merged and published in downstream modules
