@@ -48,6 +48,8 @@ jobs:
 
     permissions:
       pull-requests: write
+      issues: write
+      contents: read
 
     steps:
       - name: Validate PR description content
@@ -167,7 +169,7 @@ jobs:
               add_error "The 'Type of Change' section is empty."
 
             elif ! printf '%s\n' "$TYPE_OF_CHANGE" \
-              | grep -qE '^[[:space:]]*-[[:space:]]*\[[xX]\][[:space:]]'; then
+              | grep -qE '^[[:space:]]*-[[:space:]]*\[[xX]\]'; then
 
               add_error "No box is checked under 'Type of Change'. Check at least one that applies."
             fi
