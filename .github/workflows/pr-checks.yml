@@ -18,6 +18,10 @@ jobs:
   title-check:
     runs-on: ubuntu-latest
 
+    permissions:
+      pull-requests: write
+      issues: write
+
     steps:
       - uses: amannn/action-semantic-pull-request@v5
         env:
@@ -162,6 +166,9 @@ jobs:
             # IMPORTANT:
             # Only check boxes inside the Type of Change section.
             # A checked box in Checklist must NOT satisfy this validation.
+            #
+            # Accepts both "-" and "*" bullet styles, since the PR
+            # template uses "*".
             # ===============================================================
             TYPE_OF_CHANGE=$(extract_section "## Type of Change")
 
@@ -169,7 +176,7 @@ jobs:
               add_error "The 'Type of Change' section is empty."
 
             elif ! printf '%s\n' "$TYPE_OF_CHANGE" \
-              | grep -qE '^[[:space:]]*-[[:space:]]*\[[xX]\]'; then
+              | grep -qE '^[[:space:]]*[-*][[:space:]]*\[[xX]\]'; then
 
               add_error "No box is checked under 'Type of Change'. Check at least one that applies."
             fi
@@ -208,11 +215,12 @@ jobs:
             # Breaking Change Details
             #
             # Only required when the Breaking Change checkbox is selected.
+            # Accepts both "-" and "*" bullet styles.
             # ===============================================================
             TYPE_OF_CHANGE=$(extract_section "## Type of Change")
 
             if printf '%s\n' "$TYPE_OF_CHANGE" \
-              | grep -qiE '^[[:space:]]*-[[:space:]]*\[[xX]\][[:space:]]*Breaking change'; then
+              | grep -qiE '^[[:space:]]*[-*][[:space:]]*\[[xX]\][[:space:]]*Breaking change'; then
 
               DETAILS=$(extract_section "## Breaking Change Details")
 
