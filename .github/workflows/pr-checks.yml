@@ -11,11 +11,10 @@ permissions:
   pull-requests: read
 
 jobs:
-  # NOTE: The ruleset's required status checks reference these jobs by
-  # their job ID ("title-check" / "description-check"), NOT a custom
-  # display name. Do not add a "name:" override unless the ruleset is
-  # updated to match it exactly. Otherwise, the PR can remain stuck on
-  # "Waiting for status to be reported".
+
+  # IMPORTANT:
+  # Keep these job IDs unchanged because they are referenced by the
+  # repository ruleset required status checks.
   title-check:
     runs-on: ubuntu-latest
 
@@ -44,7 +43,6 @@ jobs:
           wip: true
           validateSingleCommit: false
 
-  # Matches the ruleset's required "description-check" check (job ID).
   description-check:
     runs-on: ubuntu-latest
 
@@ -62,8 +60,9 @@ jobs:
         run: |
           set -e
 
-          # Normalize line endings. PR bodies edited on Windows can contain
-          # CRLF (\r\n), which would otherwise break exact header matching.
+          # ---------------------------------------------------------------
+          # Normalize line endings.
+          # ---------------------------------------------------------------
           printf '%s' "$PR_BODY" | tr -d '\r' > pr_body.txt
 
           MARKER="<!-- pr-description-check-bot -->"
@@ -74,90 +73,157 @@ jobs:
             echo "::error title=PR description check::$1"
           }
 
+          # ---------------------------------------------------------------
+          # Extract content belonging to one ## section.
+          #
+          # HTML comments from the template are ignored and empty lines
+          # are removed.
+          # ---------------------------------------------------------------
           extract_section() {
             awk -v sec="$1" '
-              $0 == sec {flag=1; next}
-              /^## / {flag=0}
-              flag {print}
-            ' pr_body.txt | grep -v '<!--' | sed '/^[[:space:]]*$/d' || true
+              $0 == sec {
+                flag=1
+                next
+              }
+
+              /^## / {
+                flag=0
+              }
+
+              flag {
+                print
+              }
+            ' pr_body.txt \
+              | grep -v '<!--' \
+              | sed '/^[[:space:]]*$/d' \
+              || true
           }
 
+          # ---------------------------------------------------------------
+          # Empty PR description
+          # ---------------------------------------------------------------
           if [ -z "$PR_BODY" ]; then
             add_error "The PR description is empty. Please fill in the PR template."
+
           else
-            # --- Required section headers ---------------------------------
-            for SECTION in \
-              "## Summary" \
-              "## Jira Ticket" \
-              "## Type of Change" \
-              "## Configuration / Values Changes" \
-              "## Feature Flag" \
-              "## Testing" \
+
+            # ===============================================================
+            # Required sections
+            # These MUST match .github/pull_request_template.md
+            # ===============================================================
+            REQUIRED_SECTIONS=(
+              "## Summary"
+              "## Jira Ticket"
+              "## Type of Change"
+              "## Configuration / Values Changes"
+              "## Feature Flag"
+              "## Breaking Change Details"
+              "## Testing"
               "## Checklist"
-            do
+            )
+
+            for SECTION in "${REQUIRED_SECTIONS[@]}"; do
               if ! grep -qF "$SECTION" pr_body.txt; then
                 add_error "Missing the '$SECTION' section. Copy it from the PR template."
               fi
             done
 
-            # --- Summary must have real content ----------------------------
+            # ===============================================================
+            # Summary
+            # ===============================================================
             SUMMARY=$(extract_section "## Summary")
 
             if [ -z "$SUMMARY" ]; then
               add_error "The 'Summary' section is empty. Describe what this PR does and why."
-            elif [ "$(echo "$SUMMARY" | tr -d '[:space:]' | wc -c)" -lt 20 ]; then
-              add_error "The 'Summary' section is very short. Add a bit more detail (what changed, and why)."
+
+            elif [ "$(printf '%s' "$SUMMARY" | tr -d '[:space:]' | wc -c)" -lt 20 ]; then
+              add_error "The 'Summary' section is very short. Add more detail about what changed and why."
             fi
 
-            # --- Testing must have real content -----------------------------
-            TESTING=$(extract_section "## Testing")
-
-            if [ -z "$TESTING" ]; then
-              add_error "The 'Testing' section is empty. Describe how this change was verified."
-            fi
-
-            # --- Jira ticket key, or an explicit opt-out ---------------------
+            # ===============================================================
+            # Jira Ticket
+            # ===============================================================
             JIRA=$(extract_section "## Jira Ticket")
 
             if [ -z "$JIRA" ]; then
               add_error "The 'Jira Ticket' section is empty. Add a ticket key (e.g. PROJ-123), or write 'No related ticket'."
-            elif ! echo "$JIRA" | grep -qE '[A-Z]{2,10}-[0-9]+' \
-              && ! echo "$JIRA" | grep -qi "no related ticket"; then
+
+            elif ! printf '%s' "$JIRA" | grep -qE '[A-Z]{2,10}-[0-9]+' \
+              && ! printf '%s' "$JIRA" | grep -qi "no related ticket"; then
+
               add_error "The 'Jira Ticket' section doesn't contain a recognizable ticket key (e.g. PROJ-123), and doesn't say 'No related ticket' either."
             fi
 
-            # --- Configuration/Values must state Yes or No --------------------
+            # ===============================================================
+            # Type of Change
+            #
+            # IMPORTANT:
+            # Only check boxes inside the Type of Change section.
+            # A checked box in Checklist must NOT satisfy this validation.
+            # ===============================================================
+            TYPE_OF_CHANGE=$(extract_section "## Type of Change")
+
+            if [ -z "$TYPE_OF_CHANGE" ]; then
+              add_error "The 'Type of Change' section is empty."
+
+            elif ! printf '%s\n' "$TYPE_OF_CHANGE" \
+              | grep -qE '^[[:space:]]*-[[:space:]]*\[[xX]\][[:space:]]'; then
+
+              add_error "No box is checked under 'Type of Change'. Check at least one that applies."
+            fi
+
+            # ===============================================================
+            # Configuration / Values Changes
+            # ===============================================================
             CONFIG=$(extract_section "## Configuration / Values Changes")
 
             if [ -z "$CONFIG" ]; then
               add_error "The 'Configuration / Values Changes' section is empty. Answer Yes or No."
-            elif ! echo "$CONFIG" | grep -qiE '\b(yes|no)\b'; then
-              add_error "The 'Configuration / Values Changes' section doesn't clearly say Yes or No."
+
+            elif ! printf '%s' "$CONFIG" | grep -qiE '\b(yes|no)\b'; then
+              add_error "The 'Configuration / Values Changes' section must clearly say Yes or No."
             fi
 
-            # --- Feature Flag must be filled or explicitly N/A ----------------
+            # ===============================================================
+            # Feature Flag
+            # ===============================================================
             FLAG=$(extract_section "## Feature Flag")
 
             if [ -z "$FLAG" ]; then
               add_error "The 'Feature Flag' section is empty. Name the flag and its default state, or write 'N/A'."
             fi
 
-            # --- At least one Type of Change box checked -----------------------
-            if ! grep -qE '^[[:space:]]*-[[:space:]]*\[[xX]\]' pr_body.txt; then
-              add_error "No box is checked under 'Type of Change'. Check at least one that applies."
+            # ===============================================================
+            # Testing
+            # ===============================================================
+            TESTING=$(extract_section "## Testing")
+
+            if [ -z "$TESTING" ]; then
+              add_error "The 'Testing' section is empty. Describe how this change was verified."
             fi
 
-            # --- Breaking change requires migration details ---------------------
-            if grep -qiE '^[[:space:]]*-[[:space:]]*\[[xX]\][[:space:]]*breaking change' pr_body.txt; then
+            # ===============================================================
+            # Breaking Change Details
+            #
+            # Only required when the Breaking Change checkbox is selected.
+            # ===============================================================
+            TYPE_OF_CHANGE=$(extract_section "## Type of Change")
+
+            if printf '%s\n' "$TYPE_OF_CHANGE" \
+              | grep -qiE '^[[:space:]]*-[[:space:]]*\[[xX]\][[:space:]]*Breaking change'; then
+
               DETAILS=$(extract_section "## Breaking Change Details")
 
-              if [ -z "$DETAILS" ]; then
-                add_error "'Breaking change' is checked, but 'Breaking Change Details' is empty. Describe what breaks and the migration path."
+              if [ -z "$DETAILS" ] || [ "$DETAILS" = "N/A" ]; then
+                add_error "'Breaking change' is checked, but 'Breaking Change Details' is empty. Describe what breaks and the migration/upgrade path."
               fi
             fi
+
           fi
 
-          # --- Report results: annotations + a single PR comment -------------
+          # ===============================================================
+          # Find existing bot comment
+          # ===============================================================
           EXISTING_ID=$(curl -s \
             -H "Authorization: token $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
@@ -166,18 +232,24 @@ jobs:
               '.[] | select(.body | contains($marker)) | .id' \
             | head -n1)
 
+          # ===============================================================
+          # Report failures
+          # ===============================================================
           if [ "${#ERRORS[@]}" -gt 0 ]; then
-            BODY="$MARKER"$'\n'"### PR description needs a few fixes"$'\n\n'
 
-            for e in "${ERRORS[@]}"; do
-              BODY+="- $e"$'\n'
+            BODY="$MARKER"$'\n'
+            BODY+="### PR description needs a few fixes"$'\n\n'
+
+            for ERROR in "${ERRORS[@]}"; do
+              BODY+="- $ERROR"$'\n'
             done
 
-            BODY+=$'\n'"See \`.github/pull_request_template.md\` for the full expected structure."
+            BODY+=$'\n'"See \`.github/pull_request_template.md\` for the expected PR structure."
 
             PAYLOAD=$(jq -n --arg body "$BODY" '{body: $body}')
 
             if [ -n "$EXISTING_ID" ]; then
+
               curl -s -X PATCH \
                 -H "Authorization: token $GH_TOKEN" \
                 -H "Accept: application/vnd.github+json" \
@@ -185,7 +257,9 @@ jobs:
                 -d "$PAYLOAD" \
                 "https://api.github.com/repos/$REPO/issues/comments/$EXISTING_ID" \
                 > /dev/null
+
             else
+
               curl -s -X POST \
                 -H "Authorization: token $GH_TOKEN" \
                 -H "Accept: application/vnd.github+json" \
@@ -193,12 +267,21 @@ jobs:
                 -d "$PAYLOAD" \
                 "https://api.github.com/repos/$REPO/issues/$PR_NUMBER/comments" \
                 > /dev/null
+
             fi
 
             exit 1
+
           else
+
+            # =============================================================
+            # Remove/update previous bot comment after successful validation
+            # =============================================================
             if [ -n "$EXISTING_ID" ]; then
-              BODY="$MARKER"$'\n'"### PR description looks good"
+
+              BODY="$MARKER"$'\n'
+              BODY+="### PR description looks good"
+
               PAYLOAD=$(jq -n --arg body "$BODY" '{body: $body}')
 
               curl -s -X PATCH \
@@ -211,4 +294,5 @@ jobs:
             fi
 
             echo "PR description passed all checks."
+
           fi
