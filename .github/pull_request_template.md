@@ -1,45 +1,46 @@
 ## Summary
+
 <!-- What does this change do, and why? 2-4 sentences. -->
 
-
 ## Jira Ticket
-<!-- e.g. PROJ-123. Write "No related ticket" if there genuinely isn't one. -->
 
+<!-- e.g. PROJ-123. Write "No related ticket" if there is genuinely no related ticket. -->
 
 ## Type of Change
-- [ ] Bug fix (non-breaking change which fixes an issue)
-- [ ] New feature (non-breaking change which adds functionality)
-- [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
-- [ ] This change requires a documentation update
 
+* [ ] Bug fix (non-breaking change which fixes an issue)
+* [ ] New feature (non-breaking change which adds functionality)
+* [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
+* [ ] This change requires a documentation update
 
 ## Configuration / Values Changes
+
 <!-- Does this PR add, remove, or change any Helm values, environment variables,
      or configuration keys? Answer Yes or No. If Yes, list the keys. -->
 
-
 ## Feature Flag
+
 <!-- If this change ships behind a feature flag, name it and its default state
      (on/off). Write "N/A" if this change is not flag-gated. -->
 
-
 ## Breaking Change Details
+
 <!-- Required only if "Breaking change" is checked above.
      Describe what breaks and the migration/upgrade path. -->
 
-
 ## Testing
+
 <!-- How was this verified? What did you run or check? -->
 
-
 ## Checklist
-- [ ] My code follows style guidelines
-- [ ] I performed a self-review of my code
-- [ ] I commented my code, particularly in hard-to-understand areas
-- [ ] I made corresponding changes to the documentation
-- [ ] My changes generate no new warnings
-- [ ] I added tests exercising my implementation
-- [ ] New and existing unit tests pass locally with my changes
-- [ ] I have checked my code and corrected any misspellings
-- [ ] I considered security ramifications and mitigated to the best of my knowledge
-- [ ] Any dependent changes have been merged and published in downstream modules
+
+* [ ] My code follows style guidelines
+* [ ] I performed a self-review of my code
+* [ ] I commented my code, particularly in hard-to-understand areas
+* [ ] I made corresponding changes to the documentation
+* [ ] My changes generate no new warnings
+* [ ] I added tests exercising my implementation
+* [ ] New and existing unit tests pass locally with my changes
+* [ ] I have checked my code and corrected any misspellings
+* [ ] I considered security ramifications and mitigated to the best of my knowledge
+* [ ] Any dependent changes have been merged and published in downstream modules
