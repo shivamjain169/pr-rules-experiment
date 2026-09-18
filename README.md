@@ -1,1 +1,1 @@
-# pr-rules-experiment
+Enforce PR with some rules
