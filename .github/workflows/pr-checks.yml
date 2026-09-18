@@ -12,14 +12,13 @@ permissions:
 
 jobs:
   # NOTE: The ruleset's required status checks reference these jobs by
-  # their job id ("title-check" / "description-check"), NOT a custom
-  # display name. Do NOT add a "name:" override on these jobs unless you
-  # also update the ruleset's required checks to match exactly Ã¢â‚¬â€ otherwise
-  # the check will report under the new name, never satisfy the required
-  # check, and the PR will sit stuck on "Waiting for status to be reported"
-  # forever (this has happened before on this repo).
+  # their job ID ("title-check" / "description-check"), NOT a custom
+  # display name. Do not add a "name:" override unless the ruleset is
+  # updated to match it exactly. Otherwise, the PR can remain stuck on
+  # "Waiting for status to be reported".
   title-check:
     runs-on: ubuntu-latest
+
     steps:
       - uses: amannn/action-semantic-pull-request@v5
         env:
@@ -45,11 +44,13 @@ jobs:
           wip: true
           validateSingleCommit: false
 
-  # Matches the ruleset's required "description-check" check (job id).
+  # Matches the ruleset's required "description-check" check (job ID).
   description-check:
     runs-on: ubuntu-latest
+
     permissions:
-      pull-requests: write   # needed to post/update the summary comment
+      pull-requests: write
+
     steps:
       - name: Validate PR description content
         env:
@@ -57,10 +58,12 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
         run: |
           set -e
-          # Normalize line endings Ã¢â‚¬â€ a PR body edited on Windows can contain
-          # \r\n, which would break exact header matching below otherwise.
+
+          # Normalize line endings. PR bodies edited on Windows can contain
+          # CRLF (\r\n), which would otherwise break exact header matching.
           printf '%s' "$PR_BODY" | tr -d '\r' > pr_body.txt
 
           MARKER="<!-- pr-description-check-bot -->"
@@ -71,9 +74,6 @@ jobs:
             echo "::error title=PR description check::$1"
           }
 
-          # FIX: appended `|| true` so that an empty-but-valid section
-          # (grep -v matching nothing) doesn't trip `set -e`/pipefail and
-          # kill the whole script before it can report anything useful.
           extract_section() {
             awk -v sec="$1" '
               $0 == sec {flag=1; next}
@@ -86,9 +86,15 @@ jobs:
             add_error "The PR description is empty. Please fill in the PR template."
           else
             # --- Required section headers ---------------------------------
-            for SECTION in "## Summary" "## Jira Ticket" "## Type of Change" \
-                           "## Configuration / Values Changes" "## Feature Flag" \
-                           "## Testing" "## Checklist"; do
+            for SECTION in \
+              "## Summary" \
+              "## Jira Ticket" \
+              "## Type of Change" \
+              "## Configuration / Values Changes" \
+              "## Feature Flag" \
+              "## Testing" \
+              "## Checklist"
+            do
               if ! grep -qF "$SECTION" pr_body.txt; then
                 add_error "Missing the '$SECTION' section. Copy it from the PR template."
               fi
@@ -96,6 +102,7 @@ jobs:
 
             # --- Summary must have real content ----------------------------
             SUMMARY=$(extract_section "## Summary")
+
             if [ -z "$SUMMARY" ]; then
               add_error "The 'Summary' section is empty. Describe what this PR does and why."
             elif [ "$(echo "$SUMMARY" | tr -d '[:space:]' | wc -c)" -lt 20 ]; then
@@ -104,21 +111,24 @@ jobs:
 
             # --- Testing must have real content -----------------------------
             TESTING=$(extract_section "## Testing")
+
             if [ -z "$TESTING" ]; then
               add_error "The 'Testing' section is empty. Describe how this change was verified."
             fi
 
             # --- Jira ticket key, or an explicit opt-out ---------------------
             JIRA=$(extract_section "## Jira Ticket")
+
             if [ -z "$JIRA" ]; then
               add_error "The 'Jira Ticket' section is empty. Add a ticket key (e.g. PROJ-123), or write 'No related ticket'."
             elif ! echo "$JIRA" | grep -qE '[A-Z]{2,10}-[0-9]+' \
-                 && ! echo "$JIRA" | grep -qi "no related ticket"; then
+              && ! echo "$JIRA" | grep -qi "no related ticket"; then
               add_error "The 'Jira Ticket' section doesn't contain a recognizable ticket key (e.g. PROJ-123), and doesn't say 'No related ticket' either."
             fi
 
             # --- Configuration/Values must state Yes or No --------------------
             CONFIG=$(extract_section "## Configuration / Values Changes")
+
             if [ -z "$CONFIG" ]; then
               add_error "The 'Configuration / Values Changes' section is empty. Answer Yes or No."
             elif ! echo "$CONFIG" | grep -qiE '\b(yes|no)\b'; then
@@ -127,18 +137,20 @@ jobs:
 
             # --- Feature Flag must be filled or explicitly N/A ----------------
             FLAG=$(extract_section "## Feature Flag")
+
             if [ -z "$FLAG" ]; then
               add_error "The 'Feature Flag' section is empty. Name the flag and its default state, or write 'N/A'."
             fi
 
             # --- At least one Type of Change box checked -----------------------
-            if ! grep -qE '^\s*-\s*\[[xX]\]' pr_body.txt; then
+            if ! grep -qE '^[[:space:]]*-[[:space:]]*\[[xX]\]' pr_body.txt; then
               add_error "No box is checked under 'Type of Change'. Check at least one that applies."
             fi
 
             # --- Breaking change requires migration details ---------------------
-            if grep -qiE '^\s*-\s*\[[xX]\]\s*breaking change' pr_body.txt; then
+            if grep -qiE '^[[:space:]]*-[[:space:]]*\[[xX]\][[:space:]]*breaking change' pr_body.txt; then
               DETAILS=$(extract_section "## Breaking Change Details")
+
               if [ -z "$DETAILS" ]; then
                 add_error "'Breaking change' is checked, but 'Breaking Change Details' is empty. Describe what breaks and the migration path."
               fi
@@ -146,35 +158,57 @@ jobs:
           fi
 
           # --- Report results: annotations + a single PR comment -------------
-          EXISTING_ID=$(curl -s -H "Authorization: token $GH_TOKEN" \
+          EXISTING_ID=$(curl -s \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/$REPO/issues/$PR_NUMBER/comments" \
-            | jq -r --arg marker "$MARKER" '.[] | select(.body | contains($marker)) | .id' | head -n1)
+            | jq -r --arg marker "$MARKER" \
+              '.[] | select(.body | contains($marker)) | .id' \
+            | head -n1)
 
           if [ "${#ERRORS[@]}" -gt 0 ]; then
-            BODY="$MARKER"$'\n'"### Ã¢Å’ PR description needs a few fixes"$'\n\n'
+            BODY="$MARKER"$'\n'"### PR description needs a few fixes"$'\n\n'
+
             for e in "${ERRORS[@]}"; do
               BODY+="- $e"$'\n'
             done
+
             BODY+=$'\n'"See \`.github/pull_request_template.md\` for the full expected structure."
 
             PAYLOAD=$(jq -n --arg body "$BODY" '{body: $body}')
+
             if [ -n "$EXISTING_ID" ]; then
-              curl -s -X PATCH -H "Authorization: token $GH_TOKEN" \
-                -H "Content-Type: application/json" -d "$PAYLOAD" \
-                "https://api.github.com/repos/$REPO/issues/comments/$EXISTING_ID" > /dev/null
+              curl -s -X PATCH \
+                -H "Authorization: token $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                -H "Content-Type: application/json" \
+                -d "$PAYLOAD" \
+                "https://api.github.com/repos/$REPO/issues/comments/$EXISTING_ID" \
+                > /dev/null
             else
-              curl -s -X POST -H "Authorization: token $GH_TOKEN" \
-                -H "Content-Type: application/json" -d "$PAYLOAD" \
-                "https://api.github.com/repos/$REPO/issues/$PR_NUMBER/comments" > /dev/null
+              curl -s -X POST \
+                -H "Authorization: token $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                -H "Content-Type: application/json" \
+                -d "$PAYLOAD" \
+                "https://api.github.com/repos/$REPO/issues/$PR_NUMBER/comments" \
+                > /dev/null
             fi
+
             exit 1
           else
             if [ -n "$EXISTING_ID" ]; then
-              BODY="$MARKER"$'\n'"### Ã¢Å“â€¦ PR description looks good"
+              BODY="$MARKER"$'\n'"### PR description looks good"
               PAYLOAD=$(jq -n --arg body "$BODY" '{body: $body}')
-              curl -s -X PATCH -H "Authorization: token $GH_TOKEN" \
-                -H "Content-Type: application/json" -d "$PAYLOAD" \
-                "https://api.github.com/repos/$REPO/issues/comments/$EXISTING_ID" > /dev/null
+
+              curl -s -X PATCH \
+                -H "Authorization: token $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                -H "Content-Type: application/json" \
+                -d "$PAYLOAD" \
+                "https://api.github.com/repos/$REPO/issues/comments/$EXISTING_ID" \
+                > /dev/null
             fi
-            echo "Ã¢Å“â€¦ PR description passed all checks."
+
+            echo "PR description passed all checks."
           fi
