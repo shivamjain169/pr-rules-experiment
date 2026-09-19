@@ -1,23 +1,68 @@
 name: "PR Standards Check"
 
+# =============================================================================
+# Validates two things on every pull request before it can be merged:
+#
+#   1. title-check       - the PR title follows Conventional Commits. This
+#                           title becomes the squash-merge commit message,
+#                           which release-please parses to decide the next
+#                           version bump and to build the changelog. An
+#                           invalid title breaks that pipeline silently.
+#
+#   2. description-check - the PR description follows the required template
+#                           (Jira ticket, feature flag status, breaking
+#                           change details, etc.), so release notes and
+#                           audits have a complete trail back to the ticket
+#                           and the change.
+#
+# The two jobs have no `needs:` relationship, so they run in parallel on
+# separate runners. Total workflow time is the slower of the two jobs, not
+# their sum.
+# =============================================================================
+
 on:
   pull_request_target:
     types:
       - opened
       - edited
       - synchronize
+      - reopened
 
+# Cancel a stale run for the same PR when a new commit is pushed, instead of
+# letting outdated runs queue up behind the latest one.
+concurrency:
+  group: pr-standards-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# Workflow-level default. Each job below declares its own permissions - see
+# the note in each job for why that is necessary.
 permissions:
   pull-requests: read
 
 jobs:
 
+  # ---------------------------------------------------------------------
   # IMPORTANT:
-  # Keep these job IDs unchanged because they are referenced by the
-  # repository ruleset required status checks.
-  title-check:
-    runs-on: ubuntu-latest
+  # Keep these job IDs (`title-check`, `description-check`) unchanged.
+  # They are referenced by name in the repository ruleset's required
+  # status checks. Renaming a job ID here silently breaks branch
+  # protection until the ruleset is updated to match the new ID.
+  # ---------------------------------------------------------------------
 
+  title-check:
+    name: PR Title Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    # Declaring `permissions:` at the job level resets every unlisted
+    # scope to "none" - it does not fall back to the workflow-level
+    # default above. All four scopes below are required:
+    #   contents:      read  - action reads repository/commit metadata
+    #   pull-requests: write - action comments on the PR when the title is invalid
+    #   issues:        write - PR comments are served by the Issues API under the hood
+    #   statuses:      write - action posts a commit status (pass/fail check);
+    #                          omitting this causes a confusing
+    #                          "Resource not accessible by integration" error.
     permissions:
       contents: read
       pull-requests: write
@@ -25,7 +70,10 @@ jobs:
       statuses: write
 
     steps:
-      - uses: amannn/action-semantic-pull-request@v5
+      - name: Validate PR title (Conventional Commits)
+        id: lint-title
+        continue-on-error: true
+        uses: amannn/action-semantic-pull-request@v5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -49,13 +97,48 @@ jobs:
           wip: true
           validateSingleCommit: false
 
+      - name: Publish title check summary
+        if: always()
+        run: |
+          if [ "${{ steps.lint-title.outcome }}" = "success" ]; then
+            {
+              echo "## ✅ PR Title Check — Passed"
+              echo
+              echo "![passing](https://img.shields.io/badge/PR%20Title-Passed-brightgreen)"
+              echo
+              echo "The PR title follows Conventional Commits."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## ❌ PR Title Check — Failed"
+              echo
+              echo "![failing](https://img.shields.io/badge/PR%20Title-Failed-red)"
+              echo
+              echo "The PR title does not follow Conventional Commits."
+              echo
+              echo "**Expected format:** \`type: lowercase description\`"
+              echo
+              echo "**Example:** \`fix: correct retry logic\`"
+              echo
+              echo "**Allowed types:** feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # `continue-on-error` above lets us always publish a summary, but the
+      # job must still fail so the required status check blocks merge.
+      - name: Fail the job if the title check failed
+        if: steps.lint-title.outcome != 'success'
+        run: exit 1
+
   description-check:
+    name: PR Description Check
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     permissions:
+      contents: read
       pull-requests: write
       issues: write
-      contents: read
 
     steps:
       - name: Validate PR description content
@@ -64,14 +147,8 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
         run: |
           set -e
-
-          # ---------------------------------------------------------------
-          # Normalize line endings.
-          # ---------------------------------------------------------------
-          printf '%s' "$PR_BODY" | tr -d '\r' > pr_body.txt
 
           MARKER="<!-- pr-description-check-bot -->"
           ERRORS=()
@@ -81,44 +158,68 @@ jobs:
             echo "::error title=PR description check::$1"
           }
 
-          # ---------------------------------------------------------------
-          # Extract content belonging to one ## section.
-          #
-          # HTML comments from the template are ignored and empty lines
-          # are removed.
-          # ---------------------------------------------------------------
+          # -------------------------------------------------------------
+          # Normalize the PR body once: strip CRLF line endings and any
+          # non-breaking spaces that GitHub's rich-text editor sometimes
+          # inserts, which would otherwise break exact heading matches.
+          # -------------------------------------------------------------
+          printf '%s' "$PR_BODY" \
+            | tr -d '\r' \
+            | sed 's/\xc2\xa0/ /g' \
+            > pr_body.txt
+
+          # -------------------------------------------------------------
+          # section_exists SECTION_HEADING
+          # Case-insensitive, trailing-whitespace-tolerant check for
+          # whether a "## Heading" line exists anywhere in the PR body.
+          # -------------------------------------------------------------
+          section_exists() {
+            awk -v want="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" '
+              {
+                line = $0
+                sub(/[[:space:]]+$/, "", line)
+                if (tolower(line) == want) { found = 1; exit }
+              }
+              END { exit !found }
+            ' pr_body.txt
+          }
+
+          # -------------------------------------------------------------
+          # extract_section SECTION_HEADING
+          # Prints the body of one "## Heading" section: template HTML
+          # comments and blank lines are stripped. Matching is
+          # case-insensitive and tolerant of trailing whitespace, so
+          # "## summary " matches "## Summary".
+          # -------------------------------------------------------------
           extract_section() {
-            awk -v sec="$1" '
-              $0 == sec {
-                flag=1
-                next
+            awk -v want="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" '
+              {
+                line = $0
+                sub(/[[:space:]]+$/, "", line)
+                key = tolower(line)
               }
-
-              /^## / {
-                flag=0
-              }
-
-              flag {
-                print
-              }
+              key == want { flag = 1; next }
+              /^##[[:space:]]/ { flag = 0 }
+              flag { print }
             ' pr_body.txt \
               | grep -v '<!--' \
               | sed '/^[[:space:]]*$/d' \
               || true
           }
 
-          # ---------------------------------------------------------------
-          # Empty PR description
-          # ---------------------------------------------------------------
-          if [ -z "$PR_BODY" ]; then
+          # -------------------------------------------------------------
+          # Empty PR description (including a body that is only
+          # whitespace, e.g. someone hit space bar and left the template).
+          # -------------------------------------------------------------
+          if [ -z "$(tr -d '[:space:]' < pr_body.txt)" ]; then
             add_error "The PR description is empty. Please fill in the PR template."
 
           else
 
-            # ===============================================================
+            # ===========================================================
             # Required sections
             # These MUST match .github/pull_request_template.md
-            # ===============================================================
+            # ===========================================================
             REQUIRED_SECTIONS=(
               "## Summary"
               "## Jira Ticket"
@@ -131,122 +232,145 @@ jobs:
             )
 
             for SECTION in "${REQUIRED_SECTIONS[@]}"; do
-              if ! grep -qF "$SECTION" pr_body.txt; then
+              if ! section_exists "$SECTION"; then
                 add_error "Missing the '$SECTION' section. Copy it from the PR template."
               fi
             done
 
-            # ===============================================================
+            # ===========================================================
             # Summary
-            # ===============================================================
+            # ===========================================================
             SUMMARY=$(extract_section "## Summary")
 
             if [ -z "$SUMMARY" ]; then
               add_error "The 'Summary' section is empty. Describe what this PR does and why."
-
             elif [ "$(printf '%s' "$SUMMARY" | tr -d '[:space:]' | wc -c)" -lt 20 ]; then
               add_error "The 'Summary' section is very short. Add more detail about what changed and why."
             fi
 
-            # ===============================================================
+            # ===========================================================
             # Jira Ticket
-            # ===============================================================
+            # Accepts a standard key (e.g. PROJ-123, case-insensitive) or
+            # an explicit "No related ticket".
+            # ===========================================================
             JIRA=$(extract_section "## Jira Ticket")
 
             if [ -z "$JIRA" ]; then
               add_error "The 'Jira Ticket' section is empty. Add a ticket key (e.g. PROJ-123), or write 'No related ticket'."
-
-            elif ! printf '%s' "$JIRA" | grep -qE '[A-Z]{2,10}-[0-9]+' \
+            elif ! printf '%s' "$JIRA" | grep -qiE '[a-z]{2,10}-[0-9]+' \
               && ! printf '%s' "$JIRA" | grep -qi "no related ticket"; then
-
               add_error "The 'Jira Ticket' section doesn't contain a recognizable ticket key (e.g. PROJ-123), and doesn't say 'No related ticket' either."
             fi
 
-            # ===============================================================
+            # ===========================================================
             # Type of Change
-            #
-            # IMPORTANT:
-            # Only check boxes inside the Type of Change section.
-            # A checked box in Checklist must NOT satisfy this validation.
-            #
-            # Accepts both "-" and "*" bullet styles, since the PR
-            # template uses "*".
-            # ===============================================================
+            # Accepts "-" or "*" bullets, since the template uses "*".
+            # Only boxes inside THIS section count - a checked box under
+            # Checklist must not satisfy this validation.
+            # ===========================================================
             TYPE_OF_CHANGE=$(extract_section "## Type of Change")
 
             if [ -z "$TYPE_OF_CHANGE" ]; then
               add_error "The 'Type of Change' section is empty."
-
-            elif ! printf '%s\n' "$TYPE_OF_CHANGE" \
-              | grep -qE '^[[:space:]]*[-*][[:space:]]*\[[xX]\]'; then
-
+            elif ! printf '%s\n' "$TYPE_OF_CHANGE" | grep -qE '^[[:space:]]*[-*][[:space:]]*\[[xX]\]'; then
               add_error "No box is checked under 'Type of Change'. Check at least one that applies."
             fi
 
-            # ===============================================================
+            # ===========================================================
             # Configuration / Values Changes
-            # ===============================================================
+            # ===========================================================
             CONFIG=$(extract_section "## Configuration / Values Changes")
 
             if [ -z "$CONFIG" ]; then
               add_error "The 'Configuration / Values Changes' section is empty. Answer Yes or No."
-
             elif ! printf '%s' "$CONFIG" | grep -qiE '\b(yes|no)\b'; then
               add_error "The 'Configuration / Values Changes' section must clearly say Yes or No."
             fi
 
-            # ===============================================================
+            # ===========================================================
             # Feature Flag
-            # ===============================================================
+            # ===========================================================
             FLAG=$(extract_section "## Feature Flag")
 
             if [ -z "$FLAG" ]; then
               add_error "The 'Feature Flag' section is empty. Name the flag and its default state, or write 'N/A'."
             fi
 
-            # ===============================================================
+            # ===========================================================
             # Testing
-            # ===============================================================
+            # ===========================================================
             TESTING=$(extract_section "## Testing")
 
             if [ -z "$TESTING" ]; then
               add_error "The 'Testing' section is empty. Describe how this change was verified."
             fi
 
-            # ===============================================================
+            # ===========================================================
             # Breaking Change Details
-            #
-            # Only required when the Breaking Change checkbox is selected.
-            # Accepts both "-" and "*" bullet styles.
-            # ===============================================================
-            TYPE_OF_CHANGE=$(extract_section "## Type of Change")
-
-            if printf '%s\n' "$TYPE_OF_CHANGE" \
-              | grep -qiE '^[[:space:]]*[-*][[:space:]]*\[[xX]\][[:space:]]*Breaking change'; then
-
+            # Only required when the "Breaking change" box is checked.
+            # ===========================================================
+            if printf '%s\n' "$TYPE_OF_CHANGE" | grep -qiE '^[[:space:]]*[-*][[:space:]]*\[[xX]\][[:space:]]*Breaking change'; then
               DETAILS=$(extract_section "## Breaking Change Details")
 
-              if [ -z "$DETAILS" ] || [ "$DETAILS" = "N/A" ]; then
+              if [ -z "$DETAILS" ] || [ "$(printf '%s' "$DETAILS" | tr '[:upper:]' '[:lower:]')" = "n/a" ]; then
                 add_error "'Breaking change' is checked, but 'Breaking Change Details' is empty. Describe what breaks and the migration/upgrade path."
               fi
             fi
 
           fi
 
-          # ===============================================================
-          # Find existing bot comment
-          # ===============================================================
-          EXISTING_ID=$(curl -s \
-            -H "Authorization: token $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$REPO/issues/$PR_NUMBER/comments" \
+          # ---------------------------------------------------------------
+          # Job summary: a colored pass/fail badge plus the error list,
+          # shown on the workflow run's Summary tab.
+          # ---------------------------------------------------------------
+          if [ "${#ERRORS[@]}" -gt 0 ]; then
+            {
+              echo "## ❌ PR Description Check — Failed"
+              echo
+              echo "![failing](https://img.shields.io/badge/PR%20Description-Failed-red)"
+              echo
+              for ERROR in "${ERRORS[@]}"; do
+                echo "- $ERROR"
+              done
+              echo
+              echo "See \`.github/pull_request_template.md\` for the expected PR structure."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## ✅ PR Description Check — Passed"
+              echo
+              echo "![passing](https://img.shields.io/badge/PR%20Description-Passed-brightgreen)"
+              echo
+              echo "All required sections are present and complete."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # ---------------------------------------------------------------
+          # Find an existing bot comment so we update it in place instead
+          # of leaving a trail of duplicate comments across pushes.
+          # `pipefail` is scoped to this subshell so a curl failure is
+          # detected instead of being masked by `head`'s exit code.
+          # ---------------------------------------------------------------
+          EXISTING_ID=$(
+            set -o pipefail
+            curl -sf \
+              -H "Authorization: token $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/issues/$PR_NUMBER/comments" \
             | jq -r --arg marker "$MARKER" \
               '.[] | select(.body | contains($marker)) | .id' \
-            | head -n1)
+            | head -n1
+          ) || {
+            echo "::warning::Could not read existing PR comments (check token permissions). Continuing without updating a comment."
+            EXISTING_ID=""
+          }
 
-          # ===============================================================
-          # Report failures
-          # ===============================================================
+          # ---------------------------------------------------------------
+          # Post or update the PR comment, then pass/fail the job.
+          # Comment posting is best-effort: a failure to comment (for
+          # example a permissions hiccup) is reported as a warning but
+          # never masks the actual pass/fail result of the check itself.
+          # ---------------------------------------------------------------
           if [ "${#ERRORS[@]}" -gt 0 ]; then
 
             BODY="$MARKER"$'\n'
@@ -261,48 +385,38 @@ jobs:
             PAYLOAD=$(jq -n --arg body "$BODY" '{body: $body}')
 
             if [ -n "$EXISTING_ID" ]; then
-
-              curl -s -X PATCH \
+              curl -sf -X PATCH \
                 -H "Authorization: token $GH_TOKEN" \
                 -H "Accept: application/vnd.github+json" \
                 -H "Content-Type: application/json" \
                 -d "$PAYLOAD" \
                 "https://api.github.com/repos/$REPO/issues/comments/$EXISTING_ID" \
-                > /dev/null
-
+                > /dev/null || echo "::warning::Failed to update the PR comment (check token permissions)."
             else
-
-              curl -s -X POST \
+              curl -sf -X POST \
                 -H "Authorization: token $GH_TOKEN" \
                 -H "Accept: application/vnd.github+json" \
                 -H "Content-Type: application/json" \
                 -d "$PAYLOAD" \
                 "https://api.github.com/repos/$REPO/issues/$PR_NUMBER/comments" \
-                > /dev/null
-
+                > /dev/null || echo "::warning::Failed to post the PR comment (check token permissions)."
             fi
 
             exit 1
 
           else
 
-            # =============================================================
-            # Remove/update previous bot comment after successful validation
-            # =============================================================
             if [ -n "$EXISTING_ID" ]; then
-
-              BODY="$MARKER"$'\n'
-              BODY+="### PR description looks good"
-
+              BODY="$MARKER"$'\n'"### PR description looks good"
               PAYLOAD=$(jq -n --arg body "$BODY" '{body: $body}')
 
-              curl -s -X PATCH \
+              curl -sf -X PATCH \
                 -H "Authorization: token $GH_TOKEN" \
                 -H "Accept: application/vnd.github+json" \
                 -H "Content-Type: application/json" \
                 -d "$PAYLOAD" \
                 "https://api.github.com/repos/$REPO/issues/comments/$EXISTING_ID" \
-                > /dev/null
+                > /dev/null || echo "::warning::Failed to update the PR comment (check token permissions)."
             fi
 
             echo "PR description passed all checks."
