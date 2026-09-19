@@ -124,8 +124,89 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # `continue-on-error` above lets us always publish a summary, but the
-      # job must still fail so the required status check blocks merge.
+      # The lint action itself only fails the status check - it does not
+      # post a PR comment. This step reads its `error_message` output and
+      # posts/updates a comment on the PR, mirroring how description-check
+      # gives feedback, so a failing title is visible in the conversation
+      # thread and not only as a red status check.
+      - name: Publish title check PR comment
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          OUTCOME: ${{ steps.lint-title.outcome }}
+          ERROR_MESSAGE: ${{ steps.lint-title.outputs.error_message }}
+        run: |
+          set -e
+
+          MARKER="<!-- pr-title-check-bot -->"
+
+          if [ "$OUTCOME" = "success" ]; then
+            BODY="$MARKER"$'\n'
+            BODY+="> [!TIP]"$'\n'
+            BODY+="> **PR title looks good** ✅"
+          else
+            BODY="$MARKER"$'\n'
+            BODY+="> [!CAUTION]"$'\n'
+            BODY+="> **PR title needs a fix**"$'\n'
+            BODY+=">"$'\n'
+
+            if [ -n "$ERROR_MESSAGE" ]; then
+              # Prefix every line of the action's error message so it
+              # stays inside the colored callout box (blockquote).
+              while IFS= read -r LINE; do
+                BODY+="> $LINE"$'\n'
+              done <<< "$ERROR_MESSAGE"
+            else
+              BODY+="> The PR title does not follow Conventional Commits."$'\n'
+            fi
+
+            BODY+=">"$'\n'
+            BODY+="> **Expected format:** \`type: lowercase description\` (e.g. \`fix: correct retry logic\`)."$'\n'
+            BODY+="> **Allowed types:** feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert."
+          fi
+
+          PAYLOAD=$(jq -n --arg body "$BODY" '{body: $body}')
+
+          # Find an existing bot comment (own marker, separate from the
+          # description check's) so repeated title edits update the same
+          # comment instead of piling up new ones.
+          EXISTING_ID=$(
+            set -o pipefail
+            curl -sf \
+              -H "Authorization: token $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/issues/$PR_NUMBER/comments" \
+            | jq -r --arg marker "$MARKER" \
+              '.[] | select(.body | contains($marker)) | .id' \
+            | head -n1
+          ) || {
+            echo "::warning::Could not read existing PR comments (check token permissions). Continuing without updating a comment."
+            EXISTING_ID=""
+          }
+
+          if [ -n "$EXISTING_ID" ]; then
+            curl -sf -X PATCH \
+              -H "Authorization: token $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              -d "$PAYLOAD" \
+              "https://api.github.com/repos/$REPO/issues/comments/$EXISTING_ID" \
+              > /dev/null || echo "::warning::Failed to update the PR comment (check token permissions)."
+          else
+            curl -sf -X POST \
+              -H "Authorization: token $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              -d "$PAYLOAD" \
+              "https://api.github.com/repos/$REPO/issues/$PR_NUMBER/comments" \
+              > /dev/null || echo "::warning::Failed to post the PR comment (check token permissions)."
+          fi
+
+      # `continue-on-error` above lets us always publish a summary and a
+      # comment, but the job must still fail so the required status check
+      # blocks merge.
       - name: Fail the job if the title check failed
         if: steps.lint-title.outcome != 'success'
         run: exit 1
