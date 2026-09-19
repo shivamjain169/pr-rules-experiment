@@ -152,10 +152,21 @@ jobs:
 
           MARKER="<!-- pr-description-check-bot -->"
           ERRORS=()
+          WARNINGS=()
 
+          # add_error: a blocking problem - missing/empty required content.
+          # Shown in red and fails the job.
           add_error() {
             ERRORS+=("$1")
             echo "::error title=PR description check::$1"
+          }
+
+          # add_warning: a non-blocking suggestion - content is present but
+          # could be improved (e.g. brief, unusual formatting). Shown in
+          # yellow and does not fail the job on its own.
+          add_warning() {
+            WARNINGS+=("$1")
+            echo "::warning title=PR description check::$1"
           }
 
           # -------------------------------------------------------------
@@ -245,7 +256,7 @@ jobs:
             if [ -z "$SUMMARY" ]; then
               add_error "The 'Summary' section is empty. Describe what this PR does and why."
             elif [ "$(printf '%s' "$SUMMARY" | tr -d '[:space:]' | wc -c)" -lt 20 ]; then
-              add_error "The 'Summary' section is very short. Add more detail about what changed and why."
+              add_warning "The 'Summary' section is very short. Consider adding more detail about what changed and why."
             fi
 
             # ===========================================================
@@ -259,7 +270,7 @@ jobs:
               add_error "The 'Jira Ticket' section is empty. Add a ticket key (e.g. PROJ-123), or write 'No related ticket'."
             elif ! printf '%s' "$JIRA" | grep -qiE '[a-z]{2,10}-[0-9]+' \
               && ! printf '%s' "$JIRA" | grep -qi "no related ticket"; then
-              add_error "The 'Jira Ticket' section doesn't contain a recognizable ticket key (e.g. PROJ-123), and doesn't say 'No related ticket' either."
+              add_warning "The 'Jira Ticket' section doesn't look like a standard ticket key (e.g. PROJ-123) or 'No related ticket' - please double-check it."
             fi
 
             # ===========================================================
@@ -278,13 +289,15 @@ jobs:
 
             # ===========================================================
             # Configuration / Values Changes
+            # Accepts Yes/No, or N/A for PRs where the question doesn't
+            # apply (e.g. documentation-only changes).
             # ===========================================================
             CONFIG=$(extract_section "## Configuration / Values Changes")
 
             if [ -z "$CONFIG" ]; then
               add_error "The 'Configuration / Values Changes' section is empty. Answer Yes or No."
-            elif ! printf '%s' "$CONFIG" | grep -qiE '\b(yes|no)\b'; then
-              add_error "The 'Configuration / Values Changes' section must clearly say Yes or No."
+            elif ! printf '%s' "$CONFIG" | grep -qiE '\b(yes|no|n/a)\b'; then
+              add_warning "The 'Configuration / Values Changes' section doesn't clearly say Yes, No, or N/A - please confirm it's unambiguous."
             fi
 
             # ===========================================================
@@ -320,8 +333,10 @@ jobs:
           fi
 
           # ---------------------------------------------------------------
-          # Job summary: a colored pass/fail badge plus the error list,
-          # shown on the workflow run's Summary tab.
+          # Job summary: a colored pass/fail/warning badge plus the issue
+          # list, shown on the workflow run's Summary tab. Three states:
+          # red (blocking errors), yellow (passes, but has suggestions),
+          # green (clean pass).
           # ---------------------------------------------------------------
           if [ "${#ERRORS[@]}" -gt 0 ]; then
             {
@@ -329,11 +344,29 @@ jobs:
               echo
               echo "![failing](https://img.shields.io/badge/PR%20Description-Failed-red)"
               echo
+              echo "**Blocking issues:**"
               for ERROR in "${ERRORS[@]}"; do
-                echo "- $ERROR"
+                echo "- ❌ $ERROR"
               done
+              if [ "${#WARNINGS[@]}" -gt 0 ]; then
+                echo
+                echo "**Suggestions (non-blocking):**"
+                for WARNING in "${WARNINGS[@]}"; do
+                  echo "- ⚠️ $WARNING"
+                done
+              fi
               echo
               echo "See \`.github/pull_request_template.md\` for the expected PR structure."
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [ "${#WARNINGS[@]}" -gt 0 ]; then
+            {
+              echo "## ⚠️ PR Description Check — Passed, with suggestions"
+              echo
+              echo "![warning](https://img.shields.io/badge/PR%20Description-Passed%20with%20suggestions-yellow)"
+              echo
+              for WARNING in "${WARNINGS[@]}"; do
+                echo "- ⚠️ $WARNING"
+              done
             } >> "$GITHUB_STEP_SUMMARY"
           else
             {
@@ -366,59 +399,74 @@ jobs:
           }
 
           # ---------------------------------------------------------------
+          # Build the PR comment body using GitHub's "alert" callout
+          # syntax ( > [!CAUTION] / > [!WARNING] / > [!TIP] ). GitHub
+          # renders these as colored boxes (red / yellow / green) in
+          # rendered markdown - this is the one form of real color GitHub
+          # allows in a PR comment; inline HTML/CSS color is stripped out.
+          # ---------------------------------------------------------------
+          BODY="$MARKER"$'\n'
+
+          if [ "${#ERRORS[@]}" -gt 0 ]; then
+            BODY+="> [!CAUTION]"$'\n'
+            BODY+="> **PR description needs a few fixes**"$'\n'
+            BODY+=">"$'\n'
+            for ERROR in "${ERRORS[@]}"; do
+              BODY+="> - ❌ $ERROR"$'\n'
+            done
+            if [ "${#WARNINGS[@]}" -gt 0 ]; then
+              BODY+=">"$'\n'
+              BODY+="> **Suggestions (non-blocking):**"$'\n'
+              for WARNING in "${WARNINGS[@]}"; do
+                BODY+="> - ⚠️ $WARNING"$'\n'
+              done
+            fi
+            BODY+=">"$'\n'
+            BODY+="> See \`.github/pull_request_template.md\` for the expected PR structure."
+
+          elif [ "${#WARNINGS[@]}" -gt 0 ]; then
+            BODY+="> [!WARNING]"$'\n'
+            BODY+="> **PR description passes, with a few suggestions**"$'\n'
+            BODY+=">"$'\n'
+            for WARNING in "${WARNINGS[@]}"; do
+              BODY+="> - ⚠️ $WARNING"$'\n'
+            done
+
+          else
+            BODY+="> [!TIP]"$'\n'
+            BODY+="> **PR description looks good** ✅"
+          fi
+
+          PAYLOAD=$(jq -n --arg body "$BODY" '{body: $body}')
+
+          # ---------------------------------------------------------------
           # Post or update the PR comment, then pass/fail the job.
           # Comment posting is best-effort: a failure to comment (for
           # example a permissions hiccup) is reported as a warning but
           # never masks the actual pass/fail result of the check itself.
           # ---------------------------------------------------------------
-          if [ "${#ERRORS[@]}" -gt 0 ]; then
-
-            BODY="$MARKER"$'\n'
-            BODY+="### PR description needs a few fixes"$'\n\n'
-
-            for ERROR in "${ERRORS[@]}"; do
-              BODY+="- $ERROR"$'\n'
-            done
-
-            BODY+=$'\n'"See \`.github/pull_request_template.md\` for the expected PR structure."
-
-            PAYLOAD=$(jq -n --arg body "$BODY" '{body: $body}')
-
-            if [ -n "$EXISTING_ID" ]; then
-              curl -sf -X PATCH \
-                -H "Authorization: token $GH_TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                -H "Content-Type: application/json" \
-                -d "$PAYLOAD" \
-                "https://api.github.com/repos/$REPO/issues/comments/$EXISTING_ID" \
-                > /dev/null || echo "::warning::Failed to update the PR comment (check token permissions)."
-            else
-              curl -sf -X POST \
-                -H "Authorization: token $GH_TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                -H "Content-Type: application/json" \
-                -d "$PAYLOAD" \
-                "https://api.github.com/repos/$REPO/issues/$PR_NUMBER/comments" \
-                > /dev/null || echo "::warning::Failed to post the PR comment (check token permissions)."
-            fi
-
-            exit 1
-
+          if [ -n "$EXISTING_ID" ]; then
+            curl -sf -X PATCH \
+              -H "Authorization: token $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              -d "$PAYLOAD" \
+              "https://api.github.com/repos/$REPO/issues/comments/$EXISTING_ID" \
+              > /dev/null || echo "::warning::Failed to update the PR comment (check token permissions)."
           else
+            curl -sf -X POST \
+              -H "Authorization: token $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              -d "$PAYLOAD" \
+              "https://api.github.com/repos/$REPO/issues/$PR_NUMBER/comments" \
+              > /dev/null || echo "::warning::Failed to post the PR comment (check token permissions)."
+          fi
 
-            if [ -n "$EXISTING_ID" ]; then
-              BODY="$MARKER"$'\n'"### PR description looks good"
-              PAYLOAD=$(jq -n --arg body "$BODY" '{body: $body}')
-
-              curl -sf -X PATCH \
-                -H "Authorization: token $GH_TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                -H "Content-Type: application/json" \
-                -d "$PAYLOAD" \
-                "https://api.github.com/repos/$REPO/issues/comments/$EXISTING_ID" \
-                > /dev/null || echo "::warning::Failed to update the PR comment (check token permissions)."
-            fi
-
+          # Only blocking errors fail the job. Non-blocking suggestions
+          # are surfaced (comment + summary) but do not stop the merge.
+          if [ "${#ERRORS[@]}" -gt 0 ]; then
+            exit 1
+          else
             echo "PR description passed all checks."
-
           fi
