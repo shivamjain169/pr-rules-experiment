@@ -3,21 +3,33 @@ name: "PR Standards Check"
 # =============================================================================
 # Validates two things on every pull request before it can be merged:
 #
-#   1. title-check       - the PR title follows Conventional Commits. This
-#                           title becomes the squash-merge commit message,
-#                           which release-please parses to decide the next
-#                           version bump and to build the changelog. An
-#                           invalid title breaks that pipeline silently.
+#   1. title-check       - the PR title must contain a valid, verified Jira
+#                           ticket ID (e.g. "PROJ-123: fix retry logic").
+#                           No commit-type prefix (feat/fix/docs/...) is
+#                           required - that Conventional Commits check was
+#                           deliberately removed. A title starting with WIP
+#                           skips this check entirely. The ticket ID is
+#                           verified live against the Jira API; if that
+#                           verification fails for any reason (ticket not
+#                           found, Jira unreachable, credentials missing),
+#                           the check fails and blocks merge - there is no
+#                           "pass anyway" fallback for Jira problems.
 #
 #   2. description-check - the PR description follows the required template
-#                           (Jira ticket, feature flag status, breaking
-#                           change details, etc.), so release notes and
-#                           audits have a complete trail back to the ticket
-#                           and the change.
+#                           (feature flag status, breaking change details,
+#                           etc.), and automatically detects whether the PR
+#                           touches Local Agent code (Compute, Orchestrator,
+#                           or Proxy) from the actual file diff, only
+#                           requiring the extra impact details when that's
+#                           genuinely the case.
 #
 # The two jobs have no `needs:` relationship, so they run in parallel on
 # separate runners. Total workflow time is the slower of the two jobs, not
 # their sum.
+#
+# Neither job uses a third-party GitHub Action - both are self-contained
+# bash scripts using only tools preinstalled on ubuntu-latest (bash, grep,
+# awk, sed, curl, jq).
 # =============================================================================
 
 on:
@@ -54,124 +66,148 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
-    # Declaring `permissions:` at the job level resets every unlisted
-    # scope to "none" - it does not fall back to the workflow-level
-    # default above. All four scopes below are required:
-    #   contents:      read  - action reads repository/commit metadata
-    #   pull-requests: write - action comments on the PR when the title is invalid
-    #   issues:        write - PR comments are served by the Issues API under the hood
-    #   statuses:      write - action posts a commit status (pass/fail check);
-    #                          omitting this causes a confusing
-    #                          "Resource not accessible by integration" error.
+    # Only the two scopes actually used: commenting on the PR. No
+    # `statuses: write` or `contents: read` needed here anymore - those
+    # were specific to the third-party title-linting action, which this
+    # job no longer uses.
     permissions:
-      contents: read
       pull-requests: write
       issues: write
-      statuses: write
 
     steps:
-      - name: Validate PR title (Conventional Commits)
-        id: lint-title
-        continue-on-error: true
-        uses: amannn/action-semantic-pull-request@v5
+      - name: Validate PR title (Jira ticket required, WIP exempt)
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          types: |
-            feat
-            fix
-            docs
-            style
-            refactor
-            perf
-            test
-            build
-            ci
-            chore
-            revert
-          requireScope: false
-          subjectPattern: ^(?![A-Z]).+$
-          subjectPatternError: |
-            The description after the colon must start with a lowercase
-            letter (e.g. "fix: correct retry logic", not "fix: Correct...").
-          wip: true
-          validateSingleCommit: false
-
-      - name: Publish title check summary
-        if: always()
-        run: |
-          if [ "${{ steps.lint-title.outcome }}" = "success" ]; then
-            {
-              echo "## ✅ PR Title Check — Passed"
-              echo
-              echo "![passing](https://img.shields.io/badge/PR%20Title-Passed-brightgreen)"
-              echo
-              echo "The PR title follows Conventional Commits."
-            } >> "$GITHUB_STEP_SUMMARY"
-          else
-            {
-              echo "## ❌ PR Title Check — Failed"
-              echo
-              echo "![failing](https://img.shields.io/badge/PR%20Title-Failed-red)"
-              echo
-              echo "The PR title does not follow Conventional Commits."
-              echo
-              echo "**Expected format:** \`type: lowercase description\`"
-              echo
-              echo "**Example:** \`fix: correct retry logic\`"
-              echo
-              echo "**Allowed types:** feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      # The lint action itself only fails the status check - it does not
-      # post a PR comment. This step reads its `error_message` output and
-      # posts/updates a comment on the PR, mirroring how description-check
-      # gives feedback, so a failing title is visible in the conversation
-      # thread and not only as a red status check.
-      - name: Publish title check PR comment
-        if: always()
-        env:
+          TITLE: ${{ github.event.pull_request.title }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          OUTCOME: ${{ steps.lint-title.outcome }}
-          ERROR_MESSAGE: ${{ steps.lint-title.outputs.error_message }}
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
         run: |
           set -e
 
           MARKER="<!-- pr-title-check-bot -->"
+          STATE=""       # pass | wip | missing | not_found | api_error
+          JIRA_KEY=""
 
-          if [ "$OUTCOME" = "success" ]; then
-            BODY="$MARKER"$'\n'
-            BODY+="> [!TIP]"$'\n'
-            BODY+="> **PR title looks good** ✅"
+          # -------------------------------------------------------------
+          # WIP passthrough: a title starting with "WIP" (any case,
+          # optionally bracketed, followed by a colon or space) skips
+          # all validation and passes outright.
+          # -------------------------------------------------------------
+          if printf '%s' "$TITLE" | grep -qiE '^[[:space:]]*\[?wip\]?[:[:space:]]'; then
+            STATE="wip"
           else
-            BODY="$MARKER"$'\n'
-            BODY+="> [!CAUTION]"$'\n'
-            BODY+="> **PR title needs a fix**"$'\n'
-            BODY+=">"$'\n'
+            # -----------------------------------------------------------
+            # Extract a Jira ticket key anywhere in the title (e.g.
+            # PROJ-123). Matched case-insensitively, then normalized to
+            # uppercase for the API call - Jira keys are conventionally
+            # uppercase but the API itself is case-insensitive on lookup.
+            # -----------------------------------------------------------
+            JIRA_KEY=$(printf '%s' "$TITLE" | grep -oE '[A-Za-z]{2,10}-[0-9]+' | head -n1 | tr '[:lower:]' '[:upper:]')
 
-            if [ -n "$ERROR_MESSAGE" ]; then
-              # Prefix every line of the action's error message so it
-              # stays inside the colored callout box (blockquote).
-              while IFS= read -r LINE; do
-                BODY+="> $LINE"$'\n'
-              done <<< "$ERROR_MESSAGE"
+            if [ -z "$JIRA_KEY" ]; then
+              STATE="missing"
+            elif [ -z "$JIRA_BASE_URL" ] || [ -z "$JIRA_EMAIL" ] || [ -z "$JIRA_API_TOKEN" ]; then
+              echo "::error title=PR title check::Jira credentials are not configured (JIRA_BASE_URL / JIRA_EMAIL / JIRA_API_TOKEN secrets) - cannot verify $JIRA_KEY."
+              STATE="api_error"
             else
-              BODY+="> The PR title does not follow Conventional Commits."$'\n'
-            fi
+              HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+                -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+                -H "Accept: application/json" \
+                "$JIRA_BASE_URL/rest/api/3/issue/$JIRA_KEY") || HTTP_CODE="000"
 
-            BODY+=">"$'\n'
-            BODY+="> **Expected format:** \`type: lowercase description\` (e.g. \`fix: correct retry logic\`)."$'\n'
-            BODY+="> **Allowed types:** feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert."
+              if [ "$HTTP_CODE" = "200" ]; then
+                STATE="pass"
+              elif [ "$HTTP_CODE" = "404" ]; then
+                STATE="not_found"
+              else
+                echo "::error title=PR title check::Could not verify Jira ticket $JIRA_KEY (HTTP $HTTP_CODE)."
+                STATE="api_error"
+              fi
+            fi
           fi
+
+          # -------------------------------------------------------------
+          # One summary block, written once - not split across steps.
+          # -------------------------------------------------------------
+          case "$STATE" in
+            wip)
+              {
+                echo "## 🚧 PR Title Check — Skipped (WIP)"
+                echo
+                echo "![wip](https://img.shields.io/badge/PR%20Title-WIP-lightgrey)"
+                echo
+                echo "Title is marked WIP — Jira ticket validation is skipped until it's ready for review."
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            pass)
+              {
+                echo "## ✅ PR Title Check — Passed"
+                echo
+                echo "![passing](https://img.shields.io/badge/PR%20Title-Passed-brightgreen)"
+                echo
+                echo "Title references verified Jira ticket **$JIRA_KEY**."
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            missing)
+              {
+                echo "## ❌ PR Title Check — Failed"
+                echo
+                echo "![failing](https://img.shields.io/badge/PR%20Title-Failed-red)"
+                echo
+                echo "No Jira ticket ID found in the PR title."
+                echo
+                echo "**Expected:** a ticket key somewhere in the title, e.g. \`PROJ-123: fix retry logic\`."
+                echo
+                echo "**Or:** prefix the title with \`WIP\` if this isn't ready for a ticket yet."
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            not_found)
+              {
+                echo "## ❌ PR Title Check — Failed"
+                echo
+                echo "![failing](https://img.shields.io/badge/PR%20Title-Failed-red)"
+                echo
+                echo "Jira ticket **$JIRA_KEY** was not found in Jira. Double-check the ticket ID."
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            api_error)
+              {
+                echo "## ❌ PR Title Check — Failed"
+                echo
+                echo "![failing](https://img.shields.io/badge/PR%20Title-Failed-red)"
+                echo
+                echo "Could not verify Jira ticket **$JIRA_KEY** (API error, timeout, or missing credentials). This blocks merge - there is no non-blocking fallback for Jira problems."
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+          esac
+
+          # -------------------------------------------------------------
+          # PR comment - same "find existing marker, update in place"
+          # pattern as description-check, using its own separate marker.
+          # -------------------------------------------------------------
+          case "$STATE" in
+            wip)
+              BODY="$MARKER"$'\n'"> [!NOTE]"$'\n'"> **PR title is marked WIP** — Jira ticket validation skipped for now."
+              ;;
+            pass)
+              BODY="$MARKER"$'\n'"> [!TIP]"$'\n'"> **PR title looks good** ✅ — references verified ticket **$JIRA_KEY**."
+              ;;
+            missing)
+              BODY="$MARKER"$'\n'"> [!CAUTION]"$'\n'"> **PR title needs a Jira ticket**"$'\n'">"$'\n'"> No Jira ticket ID was found in the title. Add one (e.g. \`PROJ-123: fix retry logic\`), or prefix the title with \`WIP\` if this isn't ready yet."
+              ;;
+            not_found)
+              BODY="$MARKER"$'\n'"> [!CAUTION]"$'\n'"> **Jira ticket not found**"$'\n'">"$'\n'"> **$JIRA_KEY** doesn't exist in Jira (or isn't visible to this check). Double-check the ticket ID."
+              ;;
+            api_error)
+              BODY="$MARKER"$'\n'"> [!CAUTION]"$'\n'"> **Could not verify Jira ticket**"$'\n'">"$'\n'"> **$JIRA_KEY** could not be verified against Jira right now (API error, timeout, or missing credentials). This blocks merge until it can be verified - please retry, or contact an admin if this persists."
+              ;;
+          esac
 
           PAYLOAD=$(jq -n --arg body "$BODY" '{body: $body}')
 
-          # Find an existing bot comment (own marker, separate from the
-          # description check's) so repeated title edits update the same
-          # comment instead of piling up new ones.
           EXISTING_ID=$(
             set -o pipefail
             curl -sf \
@@ -204,12 +240,16 @@ jobs:
               > /dev/null || echo "::warning::Failed to post the PR comment (check token permissions)."
           fi
 
-      # `continue-on-error` above lets us always publish a summary and a
-      # comment, but the job must still fail so the required status check
-      # blocks merge.
-      - name: Fail the job if the title check failed
-        if: steps.lint-title.outcome != 'success'
-        run: exit 1
+          # -------------------------------------------------------------
+          # Only "pass" and "wip" succeed. Everything else fails the job -
+          # including api_error: a Jira problem no longer gets a free
+          # pass, by design.
+          # -------------------------------------------------------------
+          if [ "$STATE" = "pass" ] || [ "$STATE" = "wip" ]; then
+            exit 0
+          else
+            exit 1
+          fi
 
   description-check:
     name: PR Description Check
@@ -220,6 +260,12 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
+
+    # Configurable pattern for which changed file paths count as "Local
+    # Agent" code. Adjust this one line if the real paths differ - nothing
+    # else in the script below needs to change.
+    env:
+      LOCAL_AGENT_PATH_PATTERNS: '^(compute/|orchestrator/|proxy/)'
 
     steps:
       - name: Validate PR description content
@@ -300,6 +346,39 @@ jobs:
           }
 
           # -------------------------------------------------------------
+          # Fetch the PR's changed file paths (paginated, capped at 500
+          # files as a safety limit) to automatically detect whether this
+          # PR touches Local Agent code. This drives enforcement below -
+          # not the developer's self-reported checkbox alone - so a PR
+          # that genuinely doesn't touch Compute/Orchestrator/Proxy code
+          # never has to fill in the extra section, and one that does
+          # can't accidentally under-report it.
+          # -------------------------------------------------------------
+          LOCAL_AGENT_IMPACTED="false"
+          PAGE=1
+          while : ; do
+            FILES_PAGE=$(curl -sf \
+              -H "Authorization: token $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/pulls/$PR_NUMBER/files?per_page=100&page=$PAGE") || {
+                echo "::warning::Could not read the PR's changed files (check token permissions). Skipping automatic Local Agent impact detection - relying on the developer's checkbox only."
+                break
+              }
+
+            COUNT=$(printf '%s' "$FILES_PAGE" | jq 'length')
+            [ "$COUNT" -eq 0 ] && break
+
+            if printf '%s' "$FILES_PAGE" | jq -r '.[].filename' | grep -qE "$LOCAL_AGENT_PATH_PATTERNS"; then
+              LOCAL_AGENT_IMPACTED="true"
+              break
+            fi
+
+            [ "$COUNT" -lt 100 ] && break
+            PAGE=$((PAGE + 1))
+            [ "$PAGE" -gt 5 ] && break
+          done
+
+          # -------------------------------------------------------------
           # Empty PR description (including a body that is only
           # whitespace, e.g. someone hit space bar and left the template).
           # -------------------------------------------------------------
@@ -309,8 +388,13 @@ jobs:
           else
 
             # ===========================================================
-            # Required sections
-            # These MUST match .github/pull_request_template.md
+            # Required sections (structural presence only - content rules
+            # for each are applied individually below).
+            #
+            # NOTE: "## Jira Ticket" is kept here for structure/context
+            # only. The enforced, API-verified ticket ID now lives in the
+            # PR title itself (see title-check), so this section's
+            # *content* is no longer validated.
             # ===========================================================
             REQUIRED_SECTIONS=(
               "## Summary"
@@ -319,6 +403,8 @@ jobs:
               "## Configuration / Values Changes"
               "## Feature Flag"
               "## Breaking Change Details"
+              "## Local Agent Impact"
+              "## Local Agent Impact Details"
               "## Testing"
               "## Checklist"
             )
@@ -338,20 +424,6 @@ jobs:
               add_error "The 'Summary' section is empty. Describe what this PR does and why."
             elif [ "$(printf '%s' "$SUMMARY" | tr -d '[:space:]' | wc -c)" -lt 20 ]; then
               add_warning "The 'Summary' section is very short. Consider adding more detail about what changed and why."
-            fi
-
-            # ===========================================================
-            # Jira Ticket
-            # Accepts a standard key (e.g. PROJ-123, case-insensitive) or
-            # an explicit "No related ticket".
-            # ===========================================================
-            JIRA=$(extract_section "## Jira Ticket")
-
-            if [ -z "$JIRA" ]; then
-              add_error "The 'Jira Ticket' section is empty. Add a ticket key (e.g. PROJ-123), or write 'No related ticket'."
-            elif ! printf '%s' "$JIRA" | grep -qiE '[a-z]{2,10}-[0-9]+' \
-              && ! printf '%s' "$JIRA" | grep -qi "no related ticket"; then
-              add_warning "The 'Jira Ticket' section doesn't look like a standard ticket key (e.g. PROJ-123) or 'No related ticket' - please double-check it."
             fi
 
             # ===========================================================
@@ -408,6 +480,34 @@ jobs:
 
               if [ -z "$DETAILS" ] || [ "$(printf '%s' "$DETAILS" | tr '[:upper:]' '[:lower:]')" = "n/a" ]; then
                 add_error "'Breaking change' is checked, but 'Breaking Change Details' is empty. Describe what breaks and the migration/upgrade path."
+              fi
+            fi
+
+            # ===========================================================
+            # Local Agent Impact
+            # Enforcement is driven by the automatic file-based detection
+            # above (LOCAL_AGENT_IMPACTED), OR by the developer having
+            # proactively checked "Yes" themselves - whichever is true.
+            # A PR that touches none of the relevant paths and where the
+            # developer hasn't flagged anything sees no requirement here
+            # at all, keeping the description lightweight for everyone
+            # who isn't touching Local Agent code.
+            # ===========================================================
+            LOCAL_AGENT_SECTION=$(extract_section "## Local Agent Impact")
+
+            LOCAL_AGENT_YES_CHECKED="false"
+            if printf '%s\n' "$LOCAL_AGENT_SECTION" | grep -qiE '^[[:space:]]*[-*][[:space:]]*\[[xX]\][[:space:]]*Yes\b'; then
+              LOCAL_AGENT_YES_CHECKED="true"
+            fi
+
+            if [ "$LOCAL_AGENT_IMPACTED" = "true" ] && [ "$LOCAL_AGENT_YES_CHECKED" = "false" ]; then
+              add_error "This PR changes Compute, Orchestrator, or Proxy code, but 'Local Agent Impact' isn't checked Yes. Check 'Yes' under 'Local Agent Impact' and fill in 'Local Agent Impact Details'."
+            fi
+
+            if [ "$LOCAL_AGENT_IMPACTED" = "true" ] || [ "$LOCAL_AGENT_YES_CHECKED" = "true" ]; then
+              LOCAL_AGENT_DETAILS=$(extract_section "## Local Agent Impact Details")
+              if [ -z "$LOCAL_AGENT_DETAILS" ]; then
+                add_error "'Local Agent Impact' is Yes (or Local Agent code changed), but 'Local Agent Impact Details' is empty. Describe the impact and how it was tested."
               fi
             fi
 
