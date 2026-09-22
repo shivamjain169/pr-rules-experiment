@@ -15,13 +15,18 @@ name: "PR Standards Check"
 #                           the check fails and blocks merge - there is no
 #                           "pass anyway" fallback for Jira problems.
 #
-#   2. description-check - the PR description follows the required template
-#                           (feature flag status, breaking change details,
-#                           etc.), and automatically detects whether the PR
-#                           touches Local Agent code (Compute, Orchestrator,
-#                           or Proxy) from the actual file diff, only
-#                           requiring the extra impact details when that's
-#                           genuinely the case.
+#   2. description-check - only ONE rule in this job actually blocks
+#                           merge: Local Agent Impact Details, required
+#                           when the PR touches Local Agent code (Compute,
+#                           Orchestrator, or Proxy) - detected
+#                           automatically from the file diff, or flagged
+#                           manually by the developer, whichever applies.
+#                           Every other section (Summary, Type of Change,
+#                           Configuration, Feature Flag, Testing, Breaking
+#                           Change Details, etc.) is still checked and
+#                           surfaced as a non-blocking suggestion, but a
+#                           PR unrelated to Local Agent code is never
+#                           blocked for leaving them blank.
 #
 # The two jobs have no `needs:` relationship, so they run in parallel on
 # separate runners. Total workflow time is the slower of the two jobs, not
@@ -380,137 +385,150 @@ jobs:
 
           # -------------------------------------------------------------
           # Empty PR description (including a body that is only
-          # whitespace, e.g. someone hit space bar and left the template).
+          # whitespace). This is a suggestion, not a blocker - see the
+          # note below on what's actually mandatory in this job.
+          #
+          # Deliberately NOT gating the rest of the checks behind an
+          # if/else on emptiness: even a completely empty description
+          # still has to pass Local Agent Impact enforcement if the file
+          # diff touches Local Agent code - that's the one rule in this
+          # job that stays mandatory regardless of anything else.
           # -------------------------------------------------------------
           if [ -z "$(tr -d '[:space:]' < pr_body.txt)" ]; then
-            add_error "The PR description is empty. Please fill in the PR template."
+            add_warning "The PR description is empty. Consider filling in the PR template for context - not required, except for Local Agent Impact Details if this PR touches Local Agent code."
+          fi
 
-          else
+          # ===========================================================
+          # Required sections (structural presence only - content rules
+          # for each are applied individually below).
+          #
+          # NOTE: "## Jira Ticket" is kept here for structure/context
+          # only. The enforced, API-verified ticket ID now lives in the
+          # PR title itself (see title-check), so this section's
+          # *content* is no longer validated.
+          #
+          # NOTE ON MANDATORY VS OPTIONAL: only the Local Agent Impact
+          # rules below are blocking. Every other check in this job -
+          # including this structural presence check - is a suggestion
+          # only, so a PR unrelated to Local Agent code is never blocked
+          # for leaving a section blank.
+          # ===========================================================
+          REQUIRED_SECTIONS=(
+            "## Summary"
+            "## Jira Ticket"
+            "## Type of Change"
+            "## Configuration / Values Changes"
+            "## Feature Flag"
+            "## Breaking Change Details"
+            "## Local Agent Impact"
+            "## Local Agent Impact Details"
+            "## Testing"
+            "## Checklist"
+          )
 
-            # ===========================================================
-            # Required sections (structural presence only - content rules
-            # for each are applied individually below).
-            #
-            # NOTE: "## Jira Ticket" is kept here for structure/context
-            # only. The enforced, API-verified ticket ID now lives in the
-            # PR title itself (see title-check), so this section's
-            # *content* is no longer validated.
-            # ===========================================================
-            REQUIRED_SECTIONS=(
-              "## Summary"
-              "## Jira Ticket"
-              "## Type of Change"
-              "## Configuration / Values Changes"
-              "## Feature Flag"
-              "## Breaking Change Details"
-              "## Local Agent Impact"
-              "## Local Agent Impact Details"
-              "## Testing"
-              "## Checklist"
-            )
-
-            for SECTION in "${REQUIRED_SECTIONS[@]}"; do
-              if ! section_exists "$SECTION"; then
-                add_error "Missing the '$SECTION' section. Copy it from the PR template."
-              fi
-            done
-
-            # ===========================================================
-            # Summary
-            # ===========================================================
-            SUMMARY=$(extract_section "## Summary")
-
-            if [ -z "$SUMMARY" ]; then
-              add_error "The 'Summary' section is empty. Describe what this PR does and why."
-            elif [ "$(printf '%s' "$SUMMARY" | tr -d '[:space:]' | wc -c)" -lt 20 ]; then
-              add_warning "The 'Summary' section is very short. Consider adding more detail about what changed and why."
+          for SECTION in "${REQUIRED_SECTIONS[@]}"; do
+            if ! section_exists "$SECTION"; then
+              add_warning "Missing the '$SECTION' section. Copy it from the PR template."
             fi
+          done
 
-            # ===========================================================
-            # Type of Change
-            # Accepts "-" or "*" bullets, since the template uses "*".
-            # Only boxes inside THIS section count - a checked box under
-            # Checklist must not satisfy this validation.
-            # ===========================================================
-            TYPE_OF_CHANGE=$(extract_section "## Type of Change")
+          # ===========================================================
+          # Summary (suggestion only)
+          # ===========================================================
+          SUMMARY=$(extract_section "## Summary")
 
-            if [ -z "$TYPE_OF_CHANGE" ]; then
-              add_error "The 'Type of Change' section is empty."
-            elif ! printf '%s\n' "$TYPE_OF_CHANGE" | grep -qE '^[[:space:]]*[-*][[:space:]]*\[[xX]\]'; then
-              add_error "No box is checked under 'Type of Change'. Check at least one that applies."
+          if [ -z "$SUMMARY" ]; then
+            add_warning "The 'Summary' section is empty. Consider describing what this PR does and why."
+          elif [ "$(printf '%s' "$SUMMARY" | tr -d '[:space:]' | wc -c)" -lt 20 ]; then
+            add_warning "The 'Summary' section is very short. Consider adding more detail about what changed and why."
+          fi
+
+          # ===========================================================
+          # Type of Change (suggestion only)
+          # Accepts "-" or "*" bullets, since the template uses "*".
+          # Only boxes inside THIS section count - a checked box under
+          # Checklist must not satisfy this validation.
+          # ===========================================================
+          TYPE_OF_CHANGE=$(extract_section "## Type of Change")
+
+          if [ -z "$TYPE_OF_CHANGE" ]; then
+            add_warning "The 'Type of Change' section is empty. Consider checking the box(es) that apply."
+          elif ! printf '%s\n' "$TYPE_OF_CHANGE" | grep -qE '^[[:space:]]*[-*][[:space:]]*\[[xX]\]'; then
+            add_warning "No box is checked under 'Type of Change'. Consider checking at least one that applies."
+          fi
+
+          # ===========================================================
+          # Configuration / Values Changes (suggestion only)
+          # Accepts Yes/No, or N/A for PRs where the question doesn't
+          # apply (e.g. documentation-only changes).
+          # ===========================================================
+          CONFIG=$(extract_section "## Configuration / Values Changes")
+
+          if [ -z "$CONFIG" ]; then
+            add_warning "The 'Configuration / Values Changes' section is empty. Consider answering Yes, No, or N/A."
+          elif ! printf '%s' "$CONFIG" | grep -qiE '\b(yes|no|n/a)\b'; then
+            add_warning "The 'Configuration / Values Changes' section doesn't clearly say Yes, No, or N/A - please confirm it's unambiguous."
+          fi
+
+          # ===========================================================
+          # Feature Flag (suggestion only)
+          # ===========================================================
+          FLAG=$(extract_section "## Feature Flag")
+
+          if [ -z "$FLAG" ]; then
+            add_warning "The 'Feature Flag' section is empty. Consider naming the flag and its default state, or writing 'N/A'."
+          fi
+
+          # ===========================================================
+          # Testing (suggestion only)
+          # ===========================================================
+          TESTING=$(extract_section "## Testing")
+
+          if [ -z "$TESTING" ]; then
+            add_warning "The 'Testing' section is empty. Consider describing how this change was verified."
+          fi
+
+          # ===========================================================
+          # Breaking Change Details (suggestion only)
+          # Only flagged when the "Breaking change" box is checked.
+          # ===========================================================
+          if printf '%s\n' "$TYPE_OF_CHANGE" | grep -qiE '^[[:space:]]*[-*][[:space:]]*\[[xX]\][[:space:]]*Breaking change'; then
+            DETAILS=$(extract_section "## Breaking Change Details")
+
+            if [ -z "$DETAILS" ] || [ "$(printf '%s' "$DETAILS" | tr '[:upper:]' '[:lower:]')" = "n/a" ]; then
+              add_warning "'Breaking change' is checked, but 'Breaking Change Details' is empty. Consider describing what breaks and the migration/upgrade path."
             fi
+          fi
 
-            # ===========================================================
-            # Configuration / Values Changes
-            # Accepts Yes/No, or N/A for PRs where the question doesn't
-            # apply (e.g. documentation-only changes).
-            # ===========================================================
-            CONFIG=$(extract_section "## Configuration / Values Changes")
+          # ===========================================================
+          # Local Agent Impact - THE ONE MANDATORY (BLOCKING) RULE IN
+          # THIS JOB.
+          #
+          # Enforcement is driven by the automatic file-based detection
+          # above (LOCAL_AGENT_IMPACTED), OR by the developer having
+          # proactively checked "Yes" themselves - whichever is true.
+          # A PR that touches none of the relevant paths, where the
+          # developer also hasn't flagged anything, sees no requirement
+          # here at all - every other section in this job is a
+          # suggestion, but this one still blocks merge when it applies,
+          # by design.
+          # ===========================================================
+          LOCAL_AGENT_SECTION=$(extract_section "## Local Agent Impact")
 
-            if [ -z "$CONFIG" ]; then
-              add_error "The 'Configuration / Values Changes' section is empty. Answer Yes or No."
-            elif ! printf '%s' "$CONFIG" | grep -qiE '\b(yes|no|n/a)\b'; then
-              add_warning "The 'Configuration / Values Changes' section doesn't clearly say Yes, No, or N/A - please confirm it's unambiguous."
+          LOCAL_AGENT_YES_CHECKED="false"
+          if printf '%s\n' "$LOCAL_AGENT_SECTION" | grep -qiE '^[[:space:]]*[-*][[:space:]]*\[[xX]\][[:space:]]*Yes\b'; then
+            LOCAL_AGENT_YES_CHECKED="true"
+          fi
+
+          if [ "$LOCAL_AGENT_IMPACTED" = "true" ] && [ "$LOCAL_AGENT_YES_CHECKED" = "false" ]; then
+            add_error "This PR changes Compute, Orchestrator, or Proxy code, but 'Local Agent Impact' isn't checked Yes. Check 'Yes' under 'Local Agent Impact' and fill in 'Local Agent Impact Details'."
+          fi
+
+          if [ "$LOCAL_AGENT_IMPACTED" = "true" ] || [ "$LOCAL_AGENT_YES_CHECKED" = "true" ]; then
+            LOCAL_AGENT_DETAILS=$(extract_section "## Local Agent Impact Details")
+            if [ -z "$LOCAL_AGENT_DETAILS" ]; then
+              add_error "'Local Agent Impact' is Yes (or Local Agent code changed), but 'Local Agent Impact Details' is empty. Describe the impact and how it was tested."
             fi
-
-            # ===========================================================
-            # Feature Flag
-            # ===========================================================
-            FLAG=$(extract_section "## Feature Flag")
-
-            if [ -z "$FLAG" ]; then
-              add_error "The 'Feature Flag' section is empty. Name the flag and its default state, or write 'N/A'."
-            fi
-
-            # ===========================================================
-            # Testing
-            # ===========================================================
-            TESTING=$(extract_section "## Testing")
-
-            if [ -z "$TESTING" ]; then
-              add_error "The 'Testing' section is empty. Describe how this change was verified."
-            fi
-
-            # ===========================================================
-            # Breaking Change Details
-            # Only required when the "Breaking change" box is checked.
-            # ===========================================================
-            if printf '%s\n' "$TYPE_OF_CHANGE" | grep -qiE '^[[:space:]]*[-*][[:space:]]*\[[xX]\][[:space:]]*Breaking change'; then
-              DETAILS=$(extract_section "## Breaking Change Details")
-
-              if [ -z "$DETAILS" ] || [ "$(printf '%s' "$DETAILS" | tr '[:upper:]' '[:lower:]')" = "n/a" ]; then
-                add_error "'Breaking change' is checked, but 'Breaking Change Details' is empty. Describe what breaks and the migration/upgrade path."
-              fi
-            fi
-
-            # ===========================================================
-            # Local Agent Impact
-            # Enforcement is driven by the automatic file-based detection
-            # above (LOCAL_AGENT_IMPACTED), OR by the developer having
-            # proactively checked "Yes" themselves - whichever is true.
-            # A PR that touches none of the relevant paths and where the
-            # developer hasn't flagged anything sees no requirement here
-            # at all, keeping the description lightweight for everyone
-            # who isn't touching Local Agent code.
-            # ===========================================================
-            LOCAL_AGENT_SECTION=$(extract_section "## Local Agent Impact")
-
-            LOCAL_AGENT_YES_CHECKED="false"
-            if printf '%s\n' "$LOCAL_AGENT_SECTION" | grep -qiE '^[[:space:]]*[-*][[:space:]]*\[[xX]\][[:space:]]*Yes\b'; then
-              LOCAL_AGENT_YES_CHECKED="true"
-            fi
-
-            if [ "$LOCAL_AGENT_IMPACTED" = "true" ] && [ "$LOCAL_AGENT_YES_CHECKED" = "false" ]; then
-              add_error "This PR changes Compute, Orchestrator, or Proxy code, but 'Local Agent Impact' isn't checked Yes. Check 'Yes' under 'Local Agent Impact' and fill in 'Local Agent Impact Details'."
-            fi
-
-            if [ "$LOCAL_AGENT_IMPACTED" = "true" ] || [ "$LOCAL_AGENT_YES_CHECKED" = "true" ]; then
-              LOCAL_AGENT_DETAILS=$(extract_section "## Local Agent Impact Details")
-              if [ -z "$LOCAL_AGENT_DETAILS" ]; then
-                add_error "'Local Agent Impact' is Yes (or Local Agent code changed), but 'Local Agent Impact Details' is empty. Describe the impact and how it was tested."
-              fi
-            fi
-
           fi
 
           # ---------------------------------------------------------------
