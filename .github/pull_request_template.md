@@ -4,7 +4,10 @@
 
 ## Jira Ticket
 
-<!-- e.g. PROJ-123. Write "No related ticket" if there is genuinely no related ticket. -->
+<!-- The Jira ticket ID is now required and verified in the PR TITLE itself,
+     e.g. "fix(PROJ-123): correct retry logic" - not required here anymore.
+     Use this section only for extra context: related/linked tickets, or
+     "No related ticket" if genuinely none. -->
 
 ## Type of Change
 
@@ -27,6 +30,22 @@
 
 <!-- Required only if "Breaking change" is checked above.
      Describe what breaks and the migration/upgrade path. -->
+
+## Local Agent Impact
+
+<!-- This is checked automatically against the files this PR actually
+     changes (Compute, Orchestrator, or Proxy code) - but please also
+     confirm below regardless of what you expect the automatic check to say. -->
+
+* [ ] Yes - this PR changes Compute, Orchestrator, or Proxy code
+* [ ] No - this PR does not affect the Local Agent
+
+## Local Agent Impact Details
+
+<!-- Required only if 'Local Agent Impact' is Yes above, or if this PR's
+     file changes are automatically detected as touching Local Agent code.
+     Describe the impact and how it was tested. Leave blank if Local Agent
+     Impact is No and no relevant files changed. -->
 
 ## Testing
 
