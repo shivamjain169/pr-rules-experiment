@@ -1,13 +1,10 @@
+<!-- PR title must include the Jira ticket key(s), e.g.
+     "SCRUM-123: fix retry logic" or "SCRUM-123 SCRUM-124: fix retry logic".
+     Prefix the title with "WIP" to skip ticket validation while in progress. -->
+
 ## Summary
 
 <!-- What does this change do, and why? 2-4 sentences. -->
-
-## Jira Ticket
-
-<!-- The Jira ticket ID is now required and verified in the PR TITLE itself,
-     e.g. "fix(PROJ-123): correct retry logic" - not required here anymore.
-     Use this section only for extra context: related/linked tickets, or
-     "No related ticket" if genuinely none. -->
 
 ## Type of Change
 
@@ -33,23 +30,17 @@
 
 ## Local Agent Impact
 
-<!-- This is checked automatically against the files this PR actually
-     changes (Compute, Orchestrator, or Proxy code) - but please also
-     confirm below regardless of what you expect the automatic check to say. -->
+<!-- "Yes" is ticked automatically (once) when this PR changes Compute,
+     Orchestrator, or Proxy files. If that detection is wrong for this PR,
+     untick "Yes" and tick "No" - a reviewer will be asked to confirm. -->
 
 * [ ] Yes - this PR changes Compute, Orchestrator, or Proxy code
 * [ ] No - this PR does not affect the Local Agent
 
 ## Local Agent Impact Details
 
-<!-- Required only if 'Local Agent Impact' is Yes above, or if this PR's
-     file changes are automatically detected as touching Local Agent code.
-     Describe the impact and how it was tested. Leave blank if Local Agent
-     Impact is No and no relevant files changed. -->
-
-## Testing
-
-<!-- How was this verified? What did you run or check? -->
+<!-- Required if 'Local Agent Impact' is Yes. Describe the impact and how it
+     was tested. Leave blank if Local Agent Impact is No. -->
 
 ## Checklist
 
@@ -63,4 +54,3 @@
 * [ ] I have checked my code and corrected any misspellings
 * [ ] I considered security ramifications and mitigated to the best of my knowledge
 * [ ] Any dependent changes have been merged and published in downstream modules
-     
